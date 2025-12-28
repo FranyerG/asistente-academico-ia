@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, render_template
-from openai import OpenAI
+import openai  # IMPORTANTE: Solo 'import openai', no 'from openai import OpenAI'
 import os
 from dotenv import load_dotenv
 
@@ -10,18 +10,17 @@ app = Flask(__name__)
 # Configurar la API key desde variables de entorno
 API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 
-# FORMA CORRECTA para OpenAI >= 1.0.0
-# No pasar parámetros extra que no sean soportados
-try:
-    client = OpenAI(
-        api_key=API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-    )
-except TypeError as e:
-    # Si falla, intentar sin parámetros extra
-    print(f"Error creando cliente: {e}")
-    client = OpenAI(api_key=API_KEY)
-    client.base_url = "https://openrouter.ai/api/v1"
+# Configurar OpenAI 0.28.0 para OpenRouter
+openai.api_key = API_KEY
+openai.api_base = "https://openrouter.ai/api/v1"
+
+# Headers adicionales para OpenRouter
+import requests
+openai.requestor = requests.Session()
+openai.requestor.headers.update({
+    "HTTP-Referer": "https://asistente-academico.onrender.com",
+    "X-Title": "Asistente Académico IA"
+})
 
 # Memoria por sesión
 sessions = {}
@@ -35,30 +34,28 @@ def health():
     return jsonify({
         "status": "ok", 
         "message": "Asistente Académico IA funcionando",
-        "openai_version": "1.x"
+        "openai_version": "0.28.0"
     })
 
-@app.route('/test-api')
-def test_api():
-    """Endpoint para probar la conexión con OpenRouter"""
+@app.route('/test')
+def test():
+    """Endpoint de prueba simple"""
     try:
-        # Prueba simple con modelo gratuito
-        response = client.chat.completions.create(
+        # Prueba muy simple
+        response = openai.ChatCompletion.create(
             model="google/gemma-7b-it:free",
-            messages=[{"role": "user", "content": "Di 'hola' en español"}],
+            messages=[{"role": "user", "content": "Di 'Hola'"}],
             temperature=0.1,
             max_tokens=10
         )
         return jsonify({
             "status": "success",
-            "message": response.choices[0].message.content,
-            "model": "google/gemma-7b-it:free"
+            "response": response.choices[0].message.content
         })
     except Exception as e:
         return jsonify({
             "status": "error",
-            "error": str(e),
-            "api_key_prefix": API_KEY[:20] + "..." if API_KEY else "None"
+            "error": str(e)
         }), 500
 
 @app.route('/chat', methods=['POST'])
@@ -66,7 +63,6 @@ def chat():
     try:
         data = request.json
         
-        # Validación básica
         if not data:
             return jsonify({'error': 'No se recibieron datos'}), 400
             
@@ -87,7 +83,7 @@ def chat():
                         "Ayudas con técnicas de estudio, organización del tiempo, "
                         "orientación vocacional, informática básica, programación y redes. "
                         "Nunca humillas ni juzgas. Motivas al estudiante. "
-                        "Responde siempre en español."
+                        "Responde siempre en español de manera amable y útil."
                     )
                 }
             ]
@@ -98,25 +94,25 @@ def chat():
             "content": user_input
         })
         
-        # PRIMERO intentar con modelo gratuito
+        # Obtener respuesta de OpenRouter - SIEMPRE usar modelo gratuito primero
         try:
-            response = client.chat.completions.create(
-                model="google/gemma-7b-it:free",
+            response = openai.ChatCompletion.create(
+                model="google/gemma-7b-it:free",  # Modelo GRATUITO
                 messages=sessions[session_id],
-                temperature=0.6,
-                max_tokens=300
+                temperature=0.7,
+                max_tokens=250
             )
-            model_used = "google/gemma-7b-it:free"
+            model_used = "gemma-7b-it (free)"
         except Exception as free_error:
-            # Si falla el gratuito, intentar con el modelo pagado
+            # Si falla, intentar con otro modelo
             print(f"Modelo gratuito falló: {free_error}")
-            response = client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model="meta-llama/llama-3-8b-instruct",
                 messages=sessions[session_id],
-                temperature=0.6,
-                max_tokens=300
+                temperature=0.7,
+                max_tokens=250
             )
-            model_used = "meta-llama/llama-3-8b-instruct"
+            model_used = "llama-3-8b"
         
         ia_response = response.choices[0].message.content
         
@@ -138,7 +134,14 @@ def chat():
         
     except Exception as e:
         print(f"Error en chat: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        # Error más amigable
+        error_msg = str(e)
+        if "401" in error_msg:
+            return jsonify({'error': 'Error de autenticación. Verifica la API key.'}), 401
+        elif "429" in error_msg:
+            return jsonify({'error': 'Límite de solicitudes excedido. Intenta más tarde.'}), 429
+        else:
+            return jsonify({'error': 'Error en el servidor. Intenta nuevamente.'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
